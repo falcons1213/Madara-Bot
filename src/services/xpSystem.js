@@ -11,84 +11,92 @@ export async function addXp(message) {
     const guildId = guild.id;
     const userId = author.id;
 
-    // ⚙️ CARGAMOS LA CONFIGURACIÓN QUE HICIMOS ANTES
+    // ⚙️ CARGAMOS CONFIGURACIÓN
     const config = await getLevelingConfig(message.client, guildId);
 
-    // ❌ SI EL SISTEMA ESTÁ APAGADO, NO HACEMOS NADA
-    if (!config.enabled) return;
+    // ❌ SI SISTEMA APAGADO -> SALIR
+    if (!config || config.enabled === false) return;
 
-    // ❌ IGNORAMOS BOTS, CANALES PROHIBIDOS O ROLES PROHIBIDOS
+    // ❌ IGNORAR BOTS / DM / CANALES PROHIBIDOS
     if (
-      author.bot ||
-      config.ignoredChannels?.includes(channel.id) ||
-      member.roles.cache.some(role => config.ignoredRoles?.includes(role.id)) ||
-      config.blacklistedUsers?.includes(userId)
+      author.bot || 
+      !message.guild ||
+      (config.ignoredChannels && config.ignoredChannels.includes(channel.id)) ||
+      (config.ignoredRoles && member.roles.cache.some(r => config.ignoredRoles.includes(r.id))) ||
+      (config.blacklistedUsers && config.blacklistedUsers.includes(userId))
     ) return;
 
-    // ⏱️ COMPROBAR TIEMPO DE ESPERA (PARA QUE NO ESCRIVAN RÁPIDO)
-    const now = Date.now();
-    const cooldownKey = `${guildId}:${userId}`;
-    const lastTime = userCooldowns.get(cooldownKey) || 0;
+    // ⏱️ TIEMPO DE ESPERA (15 SEGUNDOS)
+    const ahora = Date.now();
+    const claveTiempo = `${guildId}:${userId}`;
+    const ultimoEnvio = userCooldowns.get(claveTiempo) || 0;
 
-    if (now - lastTime < (config.xpCooldown * 1000)) return;
-    userCooldowns.set(cooldownKey, now);
+    if (ahora - ultimoEnvio < (config.xpCooldown * 1000 || 15000)) return;
+    userCooldowns.set(claveTiempo, ahora);
 
-    // ✨ CALCULAR CUÁNTA XP DAR (ENTRE MÍNIMO Y MÁXIMO)
-    const xpGain = Math.floor(Math.random() * (config.xpPerMessage.max - config.xpPerMessage.min + 1)) + config.xpPerMessage.min;
+    // ✨ CÁLCULO DE XP (entre 15 y 25)
+    const xpGanada = Math.floor(Math.random() * ((config.xpPerMessage?.max || 25) - (config.xpPerMessage?.min || 15) + 1)) + (config.xpPerMessage?.min || 15);
 
-    // 📥 OBTENER DATOS DEL USUARIO
-    const userData = await getUserLevelData(message.client, guildId, userId);
+    // 📥 DATOS DEL USUARIO
+    const datosUsuario = await getUserLevelData(message.client, guildId, userId);
 
-    // ➕ SUMAR EXPERIENCIA
-    userData.xp += xpGain;
-    userData.totalXp += xpGain;
+    // ➕ SUMAMOS
+    datosUsuario.xp += xpGanada;
+    datosUsuario.totalXp += xpGanada;
 
     // 📈 COMPROBAR SI SUBIÓ DE NIVEL
-    const newLevelData = getLevelFromXp(userData.xp);
+    const nuevoNivel = getLevelFromXp(datosUsuario.xp);
 
-    let leveledUp = false;
-    let oldLevel = userData.level;
+    let subioDeNivel = false;
+    const nivelAnterior = datosUsuario.level;
 
-    // ✅ SI SUBIÓ DE NIVEL
-    if (newLevelData.level > userData.level) {
-      leveledUp = true;
-      userData.level = newLevelData.level;
-      userData.xp = newLevelData.currentXp;
+    if (nuevoNivel.level > datosUsuario.level) {
+      subioDeNivel = true;
+      datosUsuario.level = nuevoNivel.level;
+      datosUsuario.xp = nuevoNivel.currentXp;
 
-      // 📢 ENVIAR MENSAJE DE FELICIDADES
-      if (config.announceLevelUp) {
-        const canalEnvio = config.levelUpChannel ? guild.channels.cache.get(config.levelUpChannel) : channel;
+      // 📢 MENSAJE DE FELICIDADES -> AHORA SIN ERROR 404
+      if (config.announceLevelUp !== false) {
         
+        // 💥 ARREGLAMOS EL ERROR 404: SI NO HAY CANAL, USA EL MISMO DEL MENSAJE
+        let canalEnvio = channel; 
+        
+        if (config.levelUpChannel && config.levelUpChannel !== null) {
+          const canalExiste = guild.channels.cache.get(config.levelUpChannel);
+          if (canalExiste) canalEnvio = canalExiste;
+        }
+
         if (canalEnvio) {
-          const mensajeFinal = config.levelUpMessage
+          const texto = (config.levelUpMessage || "🎉 ¡FELICIDADES {user}! Subiste al NIVEL {level} 🚀")
             .replace('{user}', `${member}`)
-            .replace('{level}', userData.level.toString());
+            .replace('{level}', datosUsuario.level.toString());
 
           const embed = new EmbedBuilder()
-            .setTitle('🚀 ¡SUBISTE DE NIVEL! 🎉')
-            .setDescription(mensajeFinal)
+            .setTitle('🚀 ¡NUEVO NIVEL ALCANZADO! 🎉')
+            .setDescription(texto)
             .setColor('#2ECC71')
             .setThumbnail(author.displayAvatarURL({ size: 1024 }))
             .setTimestamp();
 
-          canalEnvio.send({ embeds: [embed] }).catch(e => logger.error('No pude enviar mensaje de nivel:', e));
+          canalEnvio.send({ embeds: [embed] }).catch(e => logger.error('No pude enviar mensaje:', e.message));
         }
       }
 
-      // 🎁 PONER ROL DE RECOMPENSA SI LO HAY
-      if (config.roleRewards && config.roleRewards[userData.level]) {
-        const rolId = config.roleRewards[userData.level];
-        const rol = guild.roles.cache.get(rolId);
-        if (rol) {
-          member.roles.add(rol).catch(e => logger.error('No pude dar el rol:', e));
+      // 🎁 ROLES DE RECOMPENSA
+      if (config.roleRewards && typeof config.roleRewards === 'object') {
+        const rolId = config.roleRewards[datosUsuario.level];
+        if (rolId) {
+          const rol = guild.roles.cache.get(rolId);
+          if (rol) member.roles.add(rol).catch(e => logger.error('No puedo dar rol:', e.message));
         }
       }
     }
 
-    // 💾 GUARDAR LOS DATOS ACTUALIZADOS
-    await saveUserLevelData(message.client, guildId, userId, userData);
+    // 💾 GUARDAR DATOS
+    await saveUserLevelData(message.client, guildId, userId, datosUsuario);
 
   } catch (error) {
-    logger.error('Error en sistema de XP:', error);
+    // ❌ YA NO MUESTRA ERROR 404, LO AVISA NOMÁS
+    logger.error('⚠️ Sistema de niveles:', error.message);
   }
 }
